@@ -11,7 +11,7 @@
 #include "io.h"
 
 #define MAX_WIIMOTES 1
-#define MAX_PAYLOAD 5300
+#define MAX_WIIMOTE_PAYLOAD 5300
 
 // holds the size of our payload we expect
 uint32_t payload_size = 0;
@@ -33,7 +33,7 @@ void print_progress(wiimote *remote, char *title, float rec, float tot)
     char completed[51];
     // update progress bar
     float p = rec / tot;
-    int i   = 0.0;
+    int i   = 0;
     char a = 177, b = 219;
     do
     {
@@ -95,7 +95,8 @@ uint32_t convert_to_uint32(uint8_t *p_value)
 int32_t findSize(char *file_name)
 {
     // opening the file in read mode
-    FILE *fp = fopen(file_name, "rb");
+    FILE *fp;
+    fopen_s(&fp, file_name, "rb");
 
     // checking if the file exist or not
     if (fp == NULL)
@@ -225,14 +226,14 @@ int write_file(wiimote *remote, char *buffer, char *file_name, int address, FILE
             return -2;
         }
 
-        if (payload_size <= 0 || payload_size >= MAX_PAYLOAD)
+        if (payload_size <= 0 || payload_size >= MAX_WIIMOTE_PAYLOAD)
         {
             printf("[ERROR] File size %d is invalid\n", payload_size);
             return 0;
         }
 
         printf("[INFO] Beginning upload of file of size %dB\n", payload_size);
-        print_progress(remote, "UPLOAD PROGRESS:", payload_received, payload_size, 1);
+        print_progress(remote, "UPLOAD PROGRESS:", (float)payload_received, (float)payload_size);
         int failures     = 0;
         payload_received = 0;
         // write header file
@@ -304,7 +305,7 @@ int write_file(wiimote *remote, char *buffer, char *file_name, int address, FILE
         }
 
         // print progress, continue reading file
-        print_progress(remote, "UPLOAD PROGRESS:", payload_received, payload_size, 1);
+        print_progress(remote, "UPLOAD PROGRESS:", (float)payload_received, (float)payload_size);
     }
 
     // close file and alert user
@@ -326,17 +327,17 @@ int download_file(wiimote *remote, char *file_buffer, char *file_name, int addre
         read_from_wiimote(remote, buffer, address);
         header *ret = (header *)buffer; // reads header info
         // set nums
-        payload_size     = convert_to_uint32(&(ret->file_size_on_remote));
+        payload_size     = convert_to_uint32((uint8_t *)&(ret->file_size_on_remote));
         payload_received = 0;
         // exit if corrupted
-        if (payload_size <= 0 || payload_size >= MAX_PAYLOAD)
+        if (payload_size <= 0 || payload_size >= MAX_WIIMOTE_PAYLOAD)
         {
             printf("[ERROR] Download size of %dB is invalid\n", payload_size);
             return -2;
         }
         printf("[INFO] Beginning download. Total size is %dB\n", payload_size);
         address += 0x10;
-        print_progress(remote, "DATA DOWNLOADED:", payload_received, payload_size, 1);
+        print_progress(remote, "DATA DOWNLOADED:", (float)payload_received, (float)payload_size);
     } else
     {
         printf("[INFO] Resuming download. %dB out of %dB\n", payload_received, payload_size);
@@ -369,7 +370,7 @@ int download_file(wiimote *remote, char *file_buffer, char *file_name, int addre
         {
             payload_received = payload_size;
         }
-        print_progress(remote, "DATA DOWNLOADED:", payload_received, payload_size, 1);
+        print_progress(remote, "DATA DOWNLOADED:", (float)payload_received, (float)payload_size);
     }
 
     // save downloaded data
@@ -387,19 +388,19 @@ void run_selected_process(wiimote **wiimotes, char *file_name, int mode)
 {
     // start of app
     wiiuse_set_leds(wiimotes[0], 0x00);
-    int address = 0x00;       // where on the remote we are
-    int fails   = 0;          // how many times a process failed
-    char buffer[MAX_PAYLOAD]; // used to hold data received/sent
-    int res;                  // result from an operation
-    FILE *fp;                 // the file we are reading/writing to
+    int address = 0x00;               // where on the remote we are
+    int fails   = 0;                  // how many times a process failed
+    char buffer[MAX_WIIMOTE_PAYLOAD]; // used to hold data received/sent
+    int res;                          // result from an operation
+    FILE *fp;                         // the file we are reading/writing to
 
     if (!mode) // init data
     {
-        fp = fopen(file_name, "rb");
+        fopen_s(&fp, file_name, "rb");
         printf("[INFO] Preparing to upload file to: %s\n", file_name);
     } else
     {
-        fp = fopen(file_name, "wb");
+        fopen_s(&fp, file_name, "wb");
         printf("[INFO] Preparing to download file to: %s\n", file_name);
     }
     int restarted_task = 0; // set if we ever fail a task
