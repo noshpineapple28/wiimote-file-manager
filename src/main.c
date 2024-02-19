@@ -1,587 +1,485 @@
-/*
- *	wiiuse
- *
- *	Written By:
- *		Michael Laforest	< para >
- *		Email: < thepara (--AT--) g m a i l [--DOT--] com >
- *
- *	Copyright 2006-2007
- *
- *	This file is part of wiiuse.
- *
- *	This program is free software; you can redistribute it and/or modify
- *	it under the terms of the GNU General Public License as published by
- *	the Free Software Foundation; either version 3 of the License, or
- *	(at your option) any later version.
- *
- *	This program is distributed in the hope that it will be useful,
- *	but WITHOUT ANY WARRANTY; without even the implied warranty of
- *	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *	GNU General Public License for more details.
- *
- *	You should have received a copy of the GNU General Public License
- *	along with this program.  If not, see <http://www.gnu.org/licenses/>.
- *
- *	$Header$
- *
- */
+#include <stdio.h> /* for printf */
+#include <time.h>  /* for timing downloads */
 
-/**
- *	@file
- *
- *	@brief Example using the wiiuse API.
- *
- *	This file is an example of how to use the wiiuse library.
- */
+#include "wiiuse.h" /* for wiimote_t, classic_ctrl_t, etc */
 
-#include <stdio.h>                      /* for printf */
-
-#include "wiiuse.h"                     /* for wiimote_t, classic_ctrl_t, etc */
+#include <stdlib.h>
 
 #ifndef WIIUSE_WIN32
-#include <unistd.h>                     /* for usleep */
+#include <unistd.h> /* for usleep */
 #endif
+#include "io.h"
 
-#define MAX_WIIMOTES				4
+#define MAX_WIIMOTES 1
+#define MAX_PAYLOAD 5300
 
+// holds the size of our payload we expect
+uint32_t payload_size = 0;
+// holds how much of the payload we've gotten
+uint32_t payload_received = 0;
 
-/**
- *	@brief Callback that handles an event.
- *
- *	@param wm		Pointer to a wiimote_t structure.
- *
- *	This function is called automatically by the wiiuse library when an
- *	event occurs on the specified wiimote.
- */
-void handle_event(struct wiimote_t* wm) {
-	printf("\n\n--- EVENT [id %i] ---\n", wm->unid);
+typedef struct header
+{
+    uint32_t file_size;
+    uint32_t file_size_on_remote;
+    uint16_t total_remotes;
+    uint16_t curr_remote_num;
+} header;
 
-	/* if a button is pressed, report it */
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_A)) {
-		printf("A pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_B)) {
-		printf("B pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_UP)) {
-		printf("UP pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_DOWN))	{
-		printf("DOWN pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_LEFT))	{
-		printf("LEFT pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_RIGHT))	{
-		printf("RIGHT pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_MINUS))	{
-		printf("MINUS pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_PLUS))	{
-		printf("PLUS pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_ONE)) {
-		printf("ONE pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_TWO)) {
-		printf("TWO pressed\n");
-	}
-	if (IS_PRESSED(wm, WIIMOTE_BUTTON_HOME))	{
-		printf("HOME pressed\n");
-	}
+void print_progress(wiimote *remote, char *title, float rec, float tot, int downloading)
+{
+    char completed[51];
+    // update progress bar
+    float p = rec / tot;
+    int i   = 0.0;
+    char a = 177, b = 219;
+    do
+    {
+        completed[i] = (i < (50.0 * p)) ? b : a;
+    } while (++i < 50.0);
+    completed[i] = '\0';
 
-	/*
-	 *	Pressing minus will tell the wiimote we are no longer interested in movement.
-	 *	This is useful because it saves battery power.
-	 */
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_MINUS)) {
-		wiiuse_motion_sensing(wm, 0);
-	}
+    printf("%s [%s]     %4dB / %4dB\r", title, completed, payload_received, payload_size);
+}
 
-	/*
-	 *	Pressing plus will tell the wiimote we are interested in movement.
-	 */
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_PLUS)) {
-		wiiuse_motion_sensing(wm, 1);
-	}
+void alert_remote(wiimote *remote)
+{
+    wiiuse_toggle_rumble(remote);
+    Sleep(175);
+    wiiuse_toggle_rumble(remote);
+    Sleep(50);
+    wiiuse_toggle_rumble(remote);
+    Sleep(200);
+    wiiuse_toggle_rumble(remote);
+}
 
-	/*
-	 *	Pressing B will toggle the rumble
-	 *
-	 *	if B is pressed but is not held, toggle the rumble
-	 */
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_B)) {
-		wiiuse_toggle_rumble(wm);
-	}
+uint16_t convert_to_uint16(uint8_t *p_value)
+{
+    uint32_t least_sig       = (0x0000 | p_value[1]);
+    uint32_t most_sig        = (0x0000 | p_value[0]) << 8;
+    uint32_t converted_value = least_sig | most_sig;
+    return converted_value;
+}
 
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_UP)) {
-		wiiuse_set_ir(wm, 1);
-	}
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_DOWN)) {
-		wiiuse_set_ir(wm, 0);
-	}
+uint32_t convert_to_uint32(uint8_t *p_value)
+{
+    uint32_t least_sig        = (0x00000000 | p_value[3]);
+    uint32_t second_least_sig = (0x00000000 | p_value[2]) << 8;
+    uint32_t second_most_sig  = (0x00000000 | p_value[1]) << 16;
+    uint32_t most_sig         = (0x00000000 | p_value[0]) << 24;
+    uint32_t converted_value  = (least_sig | second_least_sig) | (second_most_sig | most_sig);
+    return converted_value;
+}
 
-	/*
-	 * Motion+ support
-	 */
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_ONE)) {
-		if (WIIUSE_USING_EXP(wm)) {
-			wiiuse_set_motion_plus(wm, 2);    // nunchuck pass-through
-		} else {
-			wiiuse_set_motion_plus(wm, 1);    // standalone
-		}
-	}
+int32_t findSize(char *file_name)
+{
+    // opening the file in read mode
+    FILE *fp = fopen(file_name, "rb");
 
-	if (IS_JUST_PRESSED(wm, WIIMOTE_BUTTON_TWO)) {
-		wiiuse_set_motion_plus(wm, 0); // off
-	}
+    // checking if the file exist or not
+    if (fp == NULL)
+    {
+        return -1;
+    }
 
-	/* if the accelerometer is turned on then print angles */
-	if (WIIUSE_USING_ACC(wm)) {
-		printf("wiimote roll  = %f [%f]\n", wm->orient.roll, wm->orient.a_roll);
-		printf("wiimote pitch = %f [%f]\n", wm->orient.pitch, wm->orient.a_pitch);
-		printf("wiimote yaw   = %f\n", wm->orient.yaw);
-	}
+    fseek(fp, 0L, SEEK_END);
 
-	/*
-	 *	If IR tracking is enabled then print the coordinates
-	 *	on the virtual screen that the wiimote is pointing to.
-	 *
-	 *	Also make sure that we see at least 1 dot.
-	 */
-	if (WIIUSE_USING_IR(wm)) {
-		int i = 0;
+    // calculating the size of the file
+    long int res = ftell(fp);
 
-		/* go through each of the 4 possible IR sources */
-		for (; i < 4; ++i) {
-			/* check if the source is visible */
-			if (wm->ir.dot[i].visible) {
-				printf("IR source %i: (%u, %u)\n", i, wm->ir.dot[i].x, wm->ir.dot[i].y);
-			}
-		}
+    // closing the file
+    fclose(fp);
+    payload_size = res;
 
-		printf("IR cursor: (%u, %u)\n", wm->ir.x, wm->ir.y);
-		printf("IR z distance: %f\n", wm->ir.z);
-	}
+    return res;
+}
 
-	/* show events specific to supported expansions */
-	if (wm->exp.type == EXP_NUNCHUK || wm->exp.type == EXP_MOTION_PLUS_NUNCHUK) {
-		/* nunchuk */
-		struct nunchuk_t* nc = (nunchuk_t*)&wm->exp.nunchuk;
+short any_wiimote_connected(wiimote **wm, int wiimotes)
+{
+    int i;
+    if (!wm)
+    {
+        return 0;
+    }
 
-		if (IS_PRESSED(nc, NUNCHUK_BUTTON_C)) {
-			printf("Nunchuk: C pressed\n");
-		}
-		if (IS_PRESSED(nc, NUNCHUK_BUTTON_Z)) {
-			printf("Nunchuk: Z pressed\n");
-		}
+    for (i = 0; i < wiimotes; i++)
+    {
+        if (wm[i] && WIIMOTE_IS_CONNECTED(wm[i]))
+        {
+            return 1;
+        }
+    }
 
-		printf("nunchuk roll  = %f\n", nc->orient.roll);
-		printf("nunchuk pitch = %f\n", nc->orient.pitch);
-		printf("nunchuk yaw   = %f\n", nc->orient.yaw);
+    return 0;
+}
 
-		printf("nunchuk joystick angle:     %f\n", nc->js.ang);
-		printf("nunchuk joystick magnitude: %f\n", nc->js.mag);
+wiimote **connect_remotes()
+{
+    int found, connected;
 
-		printf("nunchuk joystick vals:      %f, %f\n", nc->js.x, nc->js.y);
-		printf("nunchuk joystick calibration (min, center, max): x: %i, %i, %i  y: %i, %i, %i\n",
-		    nc->js.min.x,
-		    nc->js.center.x,
-		    nc->js.max.x,
-		    nc->js.min.y,
-		    nc->js.center.y,
-		    nc->js.max.y);
-	} else if (wm->exp.type == EXP_CLASSIC) {
-		/* classic controller */
-		struct classic_ctrl_t* cc = (classic_ctrl_t*)&wm->exp.classic;
+    wiimote **wiimotes = wiiuse_init(MAX_WIIMOTES);
+    found              = wiiuse_find(wiimotes, MAX_WIIMOTES, 5);
+    if (!found)
+    {
+        printf("No wiimotes found.\n");
+        return 0;
+    }
+    connected = wiiuse_connect(wiimotes, MAX_WIIMOTES);
+    if (connected)
+    {
+        printf("Connected to %i wiimotes (of %i found).\n", connected, found);
+    } else
+    {
+        printf("Failed to connect to any wiimote.\n");
+        return 0;
+    }
 
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_ZL)) {
-			printf("Classic: ZL pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_B)) {
-			printf("Classic: B pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_Y)) {
-			printf("Classic: Y pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_A)) {
-			printf("Classic: A pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_X)) {
-			printf("Classic: X pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_ZR)) {
-			printf("Classic: ZR pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_LEFT)) {
-			printf("Classic: LEFT pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_UP)) {
-			printf("Classic: UP pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_RIGHT)) {
-			printf("Classic: RIGHT pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_DOWN)) {
-			printf("Classic: DOWN pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_FULL_L)) {
-			printf("Classic: FULL L pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_MINUS)) {
-			printf("Classic: MINUS pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_HOME)) {
-			printf("Classic: HOME pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_PLUS)) {
-			printf("Classic: PLUS pressed\n");
-		}
-		if (IS_PRESSED(cc, CLASSIC_CTRL_BUTTON_FULL_R)) {
-			printf("Classic: FULL R pressed\n");
-		}
+    return wiimotes;
+}
 
-		printf("classic L button pressed:         %f\n", cc->l_shoulder);
-		printf("classic R button pressed:         %f\n", cc->r_shoulder);
-		printf("classic left joystick angle:      %f\n", cc->ljs.ang);
-		printf("classic left joystick magnitude:  %f\n", cc->ljs.mag);
-		printf("classic right joystick angle:     %f\n", cc->rjs.ang);
-		printf("classic right joystick magnitude: %f\n", cc->rjs.mag);
-	} else if (wm->exp.type == EXP_GUITAR_HERO_3) {
-		/* guitar hero 3 guitar */
-		struct guitar_hero_3_t* gh3 = (guitar_hero_3_t*)&wm->exp.gh3;
+int read_from_wiimote(wiimote *remote, char *buffer, unsigned int address)
+{
+    wiiuse_read_data_sync(remote, 0x01, address, 16, buffer);
 
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_STRUM_UP)) {
-			printf("Guitar: Strum Up pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_STRUM_DOWN))	{
-			printf("Guitar: Strum Down pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_YELLOW)) {
-			printf("Guitar: Yellow pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_GREEN)) {
-			printf("Guitar: Green pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_BLUE)) {
-			printf("Guitar: Blue pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_RED)) {
-			printf("Guitar: Red pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_ORANGE)) {
-			printf("Guitar: Orange pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_PLUS)) {
-			printf("Guitar: Plus pressed\n");
-		}
-		if (IS_PRESSED(gh3, GUITAR_HERO_3_BUTTON_MINUS)) {
-			printf("Guitar: Minus pressed\n");
-		}
+    return 1;
+}
 
-		printf("Guitar whammy bar:          %f\n", gh3->whammy_bar);
-		printf("Guitar joystick angle:      %f\n", gh3->js.ang);
-		printf("Guitar joystick magnitude:  %f\n", gh3->js.mag);
-	} else if (wm->exp.type == EXP_WII_BOARD) {
-		/* wii balance board */
-		struct wii_board_t* wb = (wii_board_t*)&wm->exp.wb;
-		float total = wb->tl + wb->tr + wb->bl + wb->br;
-		float x = ((wb->tr + wb->br) / total) * 2 - 1;
-		float y = ((wb->tl + wb->tr) / total) * 2 - 1;
-		printf("Weight: %f kg @ (%f, %f)\n", total, x, y);
-		printf("Interpolated weight: TL:%f  TR:%f  BL:%f  BR:%f\n", wb->tl, wb->tr, wb->bl, wb->br);
-		printf("Raw: TL:%d  TR:%d  BL:%d  BR:%d\n", wb->rtl, wb->rtr, wb->rbl, wb->rbr); 
-	}
+int write_to_wiimote(wiimote *remote, char *buffer, unsigned int address)
+{
+    int res = wiiuse_write_data(remote, address, buffer, 16);
 
-	if (wm->exp.type == EXP_MOTION_PLUS ||
-	        wm->exp.type == EXP_MOTION_PLUS_NUNCHUK) {
-		printf("Motion+ angular rates (deg/sec): pitch:%03.2f roll:%03.2f yaw:%03.2f\n",
-		       wm->exp.mp.angle_rate_gyro.pitch,
-		       wm->exp.mp.angle_rate_gyro.roll,
-		       wm->exp.mp.angle_rate_gyro.yaw);
-	}
+    return 1;
+}
+
+int compare_buffers(char *buf1, char *buf2)
+{
+    int i = 0;
+    while (i < 16)
+    {
+        // they are different! EXIT
+        if (buf1[i] != buf2[i])
+        {
+            // print the vals that didnt match
+            printf("\nDIDNT MATCH: %d != %d", buf1[i], buf2[i]);
+            printf("\nDIDNT MATCH: %x != %x", buf1[i], buf2[i]);
+            printf("\nDIDNT MATCH: %d", i);
+            return 0;
+        }
+        i++;
+    }
+
+    return 1;
+}
+
+int write_file(wiimote *remote, char *buffer, char *file_name, int address, FILE *fp, int restarted)
+{
+    int res             = findSize(file_name);
+    int failures        = 0;
+    char header_buf[16] = {(payload_size >> 24),
+                           (payload_size << 8) >> 24,
+                           (payload_size << 16) >> 24,
+                           (payload_size << 24) >> 24,
+                           payload_size >> 24,
+                           (payload_size << 8) >> 24,
+                           (payload_size << 16) >> 24,
+                           (payload_size << 24) >> 24,
+                           0x00,
+                           0x01,
+                           0x00,
+                           0x01,
+                           0x00,
+                           0x00,
+                           0x00,
+                           0x00};
+    char *buf_ptr       = buffer;
+    char check_buf[16]; // used to redownload and check state
+
+    if (!address)
+    {
+        // get the file size and setup payload/payload size
+        if (res == -1)
+        {
+            printf("[ERROR] File not found. Please make sure your file exists\n");
+            fclose(fp);
+            return -2;
+        }
+
+        if (payload_size <= 0 || payload_size >= MAX_PAYLOAD)
+        {
+            printf("[ERROR] File size %d is invalid\n", payload_size);
+            return 0;
+        }
+
+        printf("[INFO] Beginning upload of file of size %dB\n", payload_size);
+        print_progress(remote, "UPLOAD PROGRESS:", payload_received, payload_size, 1);
+        int failures     = 0;
+        payload_received = 0;
+        // write header file
+        do
+        {
+            write_to_wiimote(remote, header_buf, address);
+            time_t start = time(NULL);
+            read_from_wiimote(remote, check_buf, address);
+            time_t end = time(NULL);
+            // if timed out, exit
+            if (end - start >= 5)
+            {
+                printf("\n[ERROR] Request timed out. Restarting soon...\n");
+                return address;
+            }
+        } while (!compare_buffers(header_buf, check_buf) && failures++ < 10);
+
+        if (failures >= 10)
+        {
+            printf("[ERROR] Upload timed out. Restarting soon...\n");
+            return address;
+        }
+        address += 0x10;
+    } else
+    {
+        printf("[INFO] Resuming upload. %dB out of %dB\n", payload_received, payload_size);
+        buf_ptr += address - 0x10;
+    }
+
+    int i = 0;
+    while (payload_received < payload_size)
+    {
+        // only read the file if we ARENT restarting the download
+        while (i++ < 16 && !restarted)
+        {
+            fread(buf_ptr++, sizeof(char), 1, fp);
+        }
+        // if we hit 16, reset everything
+        failures = 0;
+        do
+        {
+            write_to_wiimote(remote, buffer, address);
+            time_t start = time(NULL);
+            read_from_wiimote(remote, check_buf, address);
+            time_t end = time(NULL);
+            // if timed out, exit
+            if (end - start >= 5)
+            {
+                printf("\n[ERROR] Upload timed out. Restarting soon...\n");
+                return address;
+            }
+        } while (!compare_buffers(buffer, check_buf) && failures++ < 10);
+        // this will occur if matches SUCK
+        if (failures >= 10)
+        {
+            printf("\n[ERROR] Upload timed out. Restarting soon...\n");
+            return address;
+        }
+
+        // reset vals
+        i       = 0;
+        buf_ptr = buffer;
+        address += 0x10;
+        payload_received += 16;
+        restarted = 0; // if we successfully upload, and we restarted a upload, set restarted to false
+        if (payload_received > payload_size)
+        {
+            payload_received = payload_size;
+        }
+
+        // print progress, continue reading file
+        print_progress(remote, "UPLOAD PROGRESS:", payload_received, payload_size, 1);
+    }
+
+    // close file and alert user
+    fclose(fp);
+    alert_remote(remote);
+
+    return -1;
+}
+
+int download_file(wiimote *remote, char *file_buffer, char *file_name, int address, FILE *fp)
+{
+    char buffer[16]; // general reader buffer
+    char *file_pos = file_buffer;
+    // get header data
+    if (!address)
+    {
+        printf("[INFO] Estimating size...\n");
+        read_from_wiimote(remote, buffer, address);
+        header *ret = (header *)buffer; // reads header info
+        // set nums
+        payload_size     = convert_to_uint32(&(ret->file_size_on_remote));
+        payload_received = 0;
+        // exit if corrupted
+        if (payload_size <= 0 || payload_size >= MAX_PAYLOAD)
+        {
+            printf("[ERROR] Download size of %dB is invalid\n", payload_size);
+            return -2;
+        }
+        printf("[INFO] Beginning download. Total size is %dB\n", payload_size);
+        address += 0x10;
+        print_progress(remote, "DATA DOWNLOADED:", payload_received, payload_size, 1);
+    } else
+    {
+        printf("[INFO] Resuming download. %dB out of %dB\n", payload_received, payload_size);
+        file_pos += address - 0x10;
+    }
+
+    // now create a buffer to hold the file
+
+    // read 16 at a time
+    // this downloads the file at file_pos of the total buffer
+    while (payload_received < payload_size)
+    {
+        time_t start = time(NULL);
+        read_from_wiimote(remote, file_pos, address);
+        time_t end = time(NULL);
+        if (end - start >= 5)
+        {
+            printf("\n[ERROR] Download timed out. Restarting soon...\n");
+            return address;
+        }
+
+        // sometimes the buffer hasn't been written correctly, so pause and wait
+        Sleep(1);
+
+        // update payload and file pos
+        payload_received += 16;
+        file_pos += 16;
+        address += 0x10;
+        if (payload_received > payload_size)
+        {
+            payload_received = payload_size;
+        }
+        print_progress(remote, "DATA DOWNLOADED:", payload_received, payload_size, 1);
+    }
+
+    // save downloaded data
+    printf("\n[INFO] Data successfully downloaded. Preparing to write to file\n");
+    fwrite(file_buffer, payload_size, sizeof(char), fp);
+    printf("[INFO] Data successfully written\n");
+    alert_remote(remote);
+    fclose(fp);
+
+    return -1;
+}
+
+void run_selected_process(wiimote **wiimotes, char *file_name, int mode)
+{
+    // start of app
+    wiiuse_set_leds(wiimotes[0], 0x00);
+    int address = 0x00;       // where on the remote we are
+    int fails   = 0;          // how many times a process failed
+    char buffer[MAX_PAYLOAD]; // used to hold data received/sent
+    int res;                  // result from an operation
+    FILE *fp;                 // the file we are reading/writing to
+
+    if (!mode) // init data
+    {
+        fp = fopen(file_name, "rb");
+        printf("[INFO] Preparing to upload file to: %s\n", file_name);
+    } else
+    {
+        fp = fopen(file_name, "wb");
+        printf("[INFO] Preparing to download file to: %s\n", file_name);
+    }
+    int restarted_task = 0; // set if we ever fail a task
+    while (any_wiimote_connected(wiimotes, MAX_WIIMOTES) && fails++ < 10)
+    {
+        switch (mode)
+        {
+        case 0:
+            res = write_file(wiimotes[0], buffer, file_name, address, fp, restarted_task);
+            break;
+        case 1:
+            res = download_file(wiimotes[0], buffer, file_name, address, fp);
+            break;
+        }
+
+        // handle resulting output
+        if (res == -2 || res == -1) // if a fatal error, or a success results, exit
+        {
+            break;
+        } else if (res >= 0)
+        {
+            // this prepares to call the method to restart at a specific point
+            address        = res;
+            restarted_task = 1;
+            // completely restart the app
+            wiiuse_cleanup(wiimotes, MAX_WIIMOTES);
+            wiimotes = connect_remotes();
+            printf("\n");
+            continue;
+        }
+    }
+    if (fails >= 10)
+    {
+        printf("[ERROR] Process failed 10 times.\n        In the event that the large number of failures is "
+               "due to a broken connection, program is terminating.\n        Try again later\n\n");
+    }
 }
 
 /**
- *	@brief Callback that handles a read event.
+ *  @brief main()
  *
- *	@param wm		Pointer to a wiimote_t structure.
- *	@param data		Pointer to the filled data block.
- *	@param len		Length in bytes of the data block.
- *
- *	This function is called automatically by the wiiuse library when
- *	the wiimote has returned the full data requested by a previous
- *	call to wiiuse_read_data().
- *
- *	You can read data on the wiimote, such as Mii data, if
- *	you know the offset address and the length.
- *
- *	The \a data pointer was specified on the call to wiiuse_read_data().
- *	At the time of this function being called, it is not safe to deallocate
- *	this buffer.
+ *  Connect to up to two wiimotes and print any events
+ *  that occur on either device.
  */
-void handle_read(struct wiimote_t* wm, byte* data, unsigned short len) {
-	int i = 0;
+int main(int argc, char **argv)
+{
+    /**
+     * 0 - UPLOAD
+     * 1 - DOWNLOAD
+     */
+    int mode;
+    char *file_name;
+    if (argc == 3)
+    {
+        if (!strcmp(argv[1], "-u") || !strcmp(argv[1], "--upload"))
+        {
+            mode      = 0;
+            file_name = argv[2];
+            if (findSize(file_name) == -1 || !payload_size)
+            {
+                printf(
+                    "[ERROR] File '%s' does not exist, or is empty. Please select an existing file to upload",
+                    file_name);
+            }
+        } else if (!strcmp(argv[1], "-d") || !strcmp(argv[1], "--download"))
+        {
+            mode      = 1;
+            file_name = argv[2];
+        }
+    } else if (argc == 2) // two arg start
+    {
+        mode = 0;
+        if (!argv[1])
+        {
+            printf("[ERROR] No file given\n");
+            return 0;
+        }
+        file_name = argv[1];
+        if (findSize(file_name) == -1)
+        {
+            mode = 1;
+        }
+    } else
+    {
+        printf("[ERROR] Invalid arguments. Valid args:\n\n-u || --upload  \tSet mode to upload a file\n-d || "
+               "--download\tSet mode to download a file\n<file_name>     \tAfter selecting mode, give a file "
+               "location to read from\n");
+        return 0;
+    }
 
-	printf("\n\n--- DATA READ [wiimote id %i] ---\n", wm->unid);
-	printf("finished read of size %i\n", len);
-	for (; i < len; ++i) {
-		if (!(i % 16)) {
-			printf("\n");
-		}
-		printf("%x ", data[i]);
-	}
-	printf("\n\n");
-}
-
-
-/**
- *	@brief Callback that handles a controller status event.
- *
- *	@param wm				Pointer to a wiimote_t structure.
- *	@param attachment		Is there an attachment? (1 for yes, 0 for no)
- *	@param speaker			Is the speaker enabled? (1 for yes, 0 for no)
- *	@param ir				Is the IR support enabled? (1 for yes, 0 for no)
- *	@param led				What LEDs are lit.
- *	@param battery_level	Battery level, between 0.0 (0%) and 1.0 (100%).
- *
- *	This occurs when either the controller status changed
- *	or the controller status was requested explicitly by
- *	wiiuse_status().
- *
- *	One reason the status can change is if the nunchuk was
- *	inserted or removed from the expansion port.
- */
-void handle_ctrl_status(struct wiimote_t* wm) {
-	printf("\n\n--- CONTROLLER STATUS [wiimote id %i] ---\n", wm->unid);
-
-	printf("attachment:      %i\n", wm->exp.type);
-	printf("speaker:         %i\n", WIIUSE_USING_SPEAKER(wm));
-	printf("ir:              %i\n", WIIUSE_USING_IR(wm));
-	printf("leds:            %i %i %i %i\n", WIIUSE_IS_LED_SET(wm, 1), WIIUSE_IS_LED_SET(wm, 2), WIIUSE_IS_LED_SET(wm, 3), WIIUSE_IS_LED_SET(wm, 4));
-	printf("battery:         %f %%\n", wm->battery_level);
-}
-
-
-/**
- *	@brief Callback that handles a disconnection event.
- *
- *	@param wm				Pointer to a wiimote_t structure.
- *
- *	This can happen if the POWER button is pressed, or
- *	if the connection is interrupted.
- */
-void handle_disconnect(wiimote* wm) {
-	printf("\n\n--- DISCONNECTED [wiimote id %i] ---\n", wm->unid);
-}
-
-
-void test(struct wiimote_t* wm, byte* data, unsigned short len) {
-	printf("test: %i [%x %x %x %x]\n", len, data[0], data[1], data[2], data[3]);
-}
-
-short any_wiimote_connected(wiimote** wm, int wiimotes) {
-	int i;
-	if (!wm) {
-		return 0;
-	}
-
-	for (i = 0; i < wiimotes; i++) {
-		if (wm[i] && WIIMOTE_IS_CONNECTED(wm[i])) {
-			return 1;
-		}
-	}
-
-	return 0;
-}
-
-
-/**
- *	@brief main()
- *
- *	Connect to up to two wiimotes and print any events
- *	that occur on either device.
- */
-int main(int argc, char** argv) {
-	wiimote** wiimotes;
-	int found, connected;
-
-	/*
-	 *	Initialize an array of wiimote objects.
-	 *
-	 *	The parameter is the number of wiimotes I want to create.
-	 */
-	wiimotes =  wiiuse_init(MAX_WIIMOTES);
-
-	/*
-	 *	Find wiimote devices
-	 *
-	 *	Now we need to find some wiimotes.
-	 *	Give the function the wiimote array we created, and tell it there
-	 *	are MAX_WIIMOTES wiimotes we are interested in.
-	 *
-	 *	Set the timeout to be 5 seconds.
-	 *
-	 *	This will return the number of actual wiimotes that are in discovery mode.
-	 */
-	found = wiiuse_find(wiimotes, MAX_WIIMOTES, 5);
-	if (!found) {
-		printf("No wiimotes found.\n");
-		return 0;
-	}
-
-	/*
-	 *	Connect to the wiimotes
-	 *
-	 *	Now that we found some wiimotes, connect to them.
-	 *	Give the function the wiimote array and the number
-	 *	of wiimote devices we found.
-	 *
-	 *	This will return the number of established connections to the found wiimotes.
-	 */
-	connected = wiiuse_connect(wiimotes, MAX_WIIMOTES);
-	if (connected) {
-		printf("Connected to %i wiimotes (of %i found).\n", connected, found);
-	} else {
-		printf("Failed to connect to any wiimote.\n");
-		return 0;
-	}
-
-	/*
-	 *	Now set the LEDs and rumble for a second so it's easy
-	 *	to tell which wiimotes are connected (just like the wii does).
-	 */
-	wiiuse_set_leds(wiimotes[0], WIIMOTE_LED_1);
-	wiiuse_set_leds(wiimotes[1], WIIMOTE_LED_2);
-	wiiuse_set_leds(wiimotes[2], WIIMOTE_LED_3);
-	wiiuse_set_leds(wiimotes[3], WIIMOTE_LED_4);
-	wiiuse_rumble(wiimotes[0], 1);
-	wiiuse_rumble(wiimotes[1], 1);
+    // setup wiiuse
+    wiimote **wiimotes = connect_remotes();
 
 #ifndef WIIUSE_WIN32
-	usleep(200000);
+    usleep(200000);
 #else
-	Sleep(200);
+    Sleep(200);
 #endif
 
-	wiiuse_rumble(wiimotes[0], 0);
-	wiiuse_rumble(wiimotes[1], 0);
+    printf("\n================================\n\n");
 
-	printf("\nControls:\n");
-	printf("\tB toggles rumble.\n");
-	printf("\t+ to start Wiimote accelerometer reporting, - to stop\n");
-	printf("\tUP to start IR camera (sensor bar mode), DOWN to stop.\n");
-	printf("\t1 to start Motion+ reporting, 2 to stop.\n");
-	printf("\n\n");
+    run_selected_process(wiimotes, file_name, mode);
+    wiiuse_cleanup(wiimotes, MAX_WIIMOTES);
 
-	/*
-	 *	Maybe I'm interested in the battery power of the 0th
-	 *	wiimote.  This should be WIIMOTE_ID_1 but to be sure
-	 *	you can get the wiimote associated with WIIMOTE_ID_1
-	 *	using the wiiuse_get_by_id() function.
-	 *
-	 *	A status request will return other things too, like
-	 *	if any expansions are plugged into the wiimote or
-	 *	what LEDs are lit.
-	 */
-	/* wiiuse_status(wiimotes[0]); */
-
-	/*
-	 *	This is the main loop
-	 *
-	 *	wiiuse_poll() needs to be called with the wiimote array
-	 *	and the number of wiimote structures in that array
-	 *	(it doesn't matter if some of those wiimotes are not used
-	 *	or are not connected).
-	 *
-	 *	This function will set the event flag for each wiimote
-	 *	when the wiimote has things to report.
-	 */
-	while (any_wiimote_connected(wiimotes, MAX_WIIMOTES)) {
-		if (wiiuse_poll(wiimotes, MAX_WIIMOTES)) {
-			/*
-			 *	This happens if something happened on any wiimote.
-			 *	So go through each one and check if anything happened.
-			 */
-			int i = 0;
-			for (; i < MAX_WIIMOTES; ++i) {
-				switch (wiimotes[i]->event) {
-					case WIIUSE_EVENT:
-						/* a generic event occurred */
-						handle_event(wiimotes[i]);
-						break;
-
-					case WIIUSE_STATUS:
-						/* a status event occurred */
-						handle_ctrl_status(wiimotes[i]);
-						break;
-
-					case WIIUSE_DISCONNECT:
-					case WIIUSE_UNEXPECTED_DISCONNECT:
-						/* the wiimote disconnected */
-						handle_disconnect(wiimotes[i]);
-						break;
-
-					case WIIUSE_READ_DATA:
-						/*
-						 *	Data we requested to read was returned.
-						 *	Take a look at wiimotes[i]->read_req
-						 *	for the data.
-						 */
-						break;
-
-					case WIIUSE_NUNCHUK_INSERTED:
-						/*
-						 *	a nunchuk was inserted
-						 *	This is a good place to set any nunchuk specific
-						 *	threshold values.  By default they are the same
-						 *	as the wiimote.
-						 */
-						/* wiiuse_set_nunchuk_orient_threshold((struct nunchuk_t*)&wiimotes[i]->exp.nunchuk, 90.0f); */
-						/* wiiuse_set_nunchuk_accel_threshold((struct nunchuk_t*)&wiimotes[i]->exp.nunchuk, 100); */
-						printf("Nunchuk inserted.\n");
-						break;
-
-					case WIIUSE_CLASSIC_CTRL_INSERTED:
-						printf("Classic controller inserted.\n");
-						break;
-
-					case WIIUSE_WII_BOARD_CTRL_INSERTED:
-						printf("Balance board controller inserted.\n");
-						break;
-
-					case WIIUSE_GUITAR_HERO_3_CTRL_INSERTED:
-						/* some expansion was inserted */
-						handle_ctrl_status(wiimotes[i]);
-						printf("Guitar Hero 3 controller inserted.\n");
-						break;
-
-					case WIIUSE_MOTION_PLUS_ACTIVATED:
-						printf("Motion+ was activated\n");
-						break;
-
-					case WIIUSE_NUNCHUK_REMOVED:
-					case WIIUSE_CLASSIC_CTRL_REMOVED:
-					case WIIUSE_GUITAR_HERO_3_CTRL_REMOVED:
-					case WIIUSE_WII_BOARD_CTRL_REMOVED:
-					case WIIUSE_MOTION_PLUS_REMOVED:
-						/* some expansion was removed */
-						handle_ctrl_status(wiimotes[i]);
-						printf("An expansion was removed.\n");
-						break;
-
-					default:
-						break;
-				}
-			}
-		}
-	}
-
-	/*
-	 *	Disconnect the wiimotes
-	 */
-	wiiuse_cleanup(wiimotes, MAX_WIIMOTES);
-
-	return 0;
+    return 0;
 }
