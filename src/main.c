@@ -17,6 +17,8 @@
 uint32_t payload_size = 0;
 // holds how much of the payload we've gotten
 uint32_t payload_received = 0;
+// leds of the wiimote
+int leds = 0x00;
 
 typedef struct header
 {
@@ -26,7 +28,7 @@ typedef struct header
     uint16_t curr_remote_num;
 } header;
 
-void print_progress(wiimote *remote, char *title, float rec, float tot, int downloading)
+void print_progress(wiimote *remote, char *title, float rec, float tot)
 {
     char completed[51];
     // update progress bar
@@ -38,6 +40,25 @@ void print_progress(wiimote *remote, char *title, float rec, float tot, int down
         completed[i] = (i < (50.0 * p)) ? b : a;
     } while (++i < 50.0);
     completed[i] = '\0';
+
+    // update LEDS
+    if (p <= 0.25)
+    {
+        leds = 0x00;
+        wiiuse_set_leds(remote, leds);
+    } else if (p <= 0.5)
+    {
+        leds = (1 << 4);
+        wiiuse_set_leds(remote, leds);
+    } else if (p <= 0.75)
+    {
+        leds = (1 << 5) | (1 << 4);
+        wiiuse_set_leds(remote, leds);
+    } else
+    {
+        leds = (1 << 6) | (1 << 5) | (1 << 4);
+        wiiuse_set_leds(remote, leds);
+    }
 
     printf("%s [%s]     %4dB / %4dB\r", title, completed, payload_received, payload_size);
 }
@@ -288,6 +309,7 @@ int write_file(wiimote *remote, char *buffer, char *file_name, int address, FILE
 
     // close file and alert user
     fclose(fp);
+    wiiuse_set_leds(remote, 0xF0);
     alert_remote(remote);
 
     return -1;
@@ -354,6 +376,7 @@ int download_file(wiimote *remote, char *file_buffer, char *file_name, int addre
     printf("\n[INFO] Data successfully downloaded. Preparing to write to file\n");
     fwrite(file_buffer, payload_size, sizeof(char), fp);
     printf("[INFO] Data successfully written\n");
+    wiiuse_set_leds(remote, 0xF0);
     alert_remote(remote);
     fclose(fp);
 
@@ -479,6 +502,11 @@ int main(int argc, char **argv)
     printf("\n================================\n\n");
 
     run_selected_process(wiimotes, file_name, mode);
+
+    // wait for rumble input to end
+    Sleep(500);
+    wiiuse_set_leds(wiimotes[0], 0x00);
+    Sleep(100); // wait for remote to turn off
     wiiuse_cleanup(wiimotes, MAX_WIIMOTES);
 
     return 0;
