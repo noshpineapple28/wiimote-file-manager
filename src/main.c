@@ -5,12 +5,14 @@
 #include "wiiuse.h" /* for wiimote_t, classic_ctrl_t, etc */
 #include "io.h"
 
+#include "wpf_handler.h"
+
 #ifndef WIIUSE_WIN32
 #include <unistd.h> /* for usleep */
 #endif
 
-#define MAX_WIIMOTES 1
-#define MAX_WIIMOTE_PAYLOAD 5300
+#define MAX_WIIMOTES 2
+#define MAX_WIIMOTE_PAYLOAD 5360
 
 // holds the size of our payload we expect
 uint32_t payload_size = 0;
@@ -18,6 +20,10 @@ uint32_t payload_size = 0;
 uint32_t payload_received = 0;
 // leds of the wiimote
 int leds = 0x00;
+// the total num of wiimotes for a download
+int tot_wiimotes = 0;
+// current wiimote
+int cur_wiimote = 0;
 
 typedef struct header
 {
@@ -340,22 +346,25 @@ int write_file(wiimote *remote, char *buffer, char *file_name, int address, FILE
 {
     char *buf_ptr = buffer;
     char check_buf[16]; // used to redownload and check state
+    int res = findSize(file_name);
+    payload_size += 0x30; // account for header
+    buf_ptr += address;
 
     // setup header
-    if (address < 0x30)
-    {
-        // if upload timed out, exit
-        if (upload_header(remote, file_name, fp) == 0x00)
-        {
-            return 0x00;
-        }
-        address = 0x30;
-        print_progress(remote, "UPLOAD PROGRESS:", (float)payload_received, (float)payload_size);
-    } else
-    {
-        printf("[INFO] Resuming upload. %dB out of %dB\n", payload_received, payload_size);
-        buf_ptr += address - 0x30;
-    }
+    // if (address < 0x30)
+    // {
+    //     // if upload timed out, exit
+    //     if (upload_header(remote, file_name, fp) == 0x00)
+    //     {
+    //         return 0x00;
+    //     }
+    //     address = 0x30;
+    //     print_progress(remote, "UPLOAD PROGRESS:", (float)payload_received, (float)payload_size);
+    // } else
+    // {
+    //     printf("[INFO] Resuming upload. %dB out of %dB\n", payload_received, payload_size);
+    //     buf_ptr += address - 0x30;
+    // }
 
     int i = 0;
     // upload the rest of the file
@@ -390,53 +399,61 @@ int write_file(wiimote *remote, char *buffer, char *file_name, int address, FILE
     return -1;
 }
 
-int download_header(wiimote *remote, char *file_name)
+int download_header(wiimote *remote, char *buffer, char *file_name, WiimotePartialFile *wpf)
 {
-    char buffer[16];
+    char *file_pos = buffer;
+    char read_buf[16];
 
     printf("[INFO] Estimating size...\n");
-    if (read_from_wiimote(remote, buffer, 0x00) == -1)
+    if (read_from_wiimote(remote, file_pos, 0x00) == -1)
     {
         return -1;
     }
-    header *ret = (header *)buffer; // reads header info
+    header *ret = (header *)file_pos; // reads header info
     // set nums
     payload_size     = convert_to_uint32((uint8_t *)&(ret->file_size_on_remote));
+    tot_wiimotes     = convert_to_uint16((uint8_t *)&(ret->total_remotes));
+    cur_wiimote      = convert_to_uint16((uint8_t *)&(ret->curr_remote_num));
     payload_received = 0;
     // exit if corrupted
-    if (payload_size <= 0 || payload_size >= MAX_WIIMOTE_PAYLOAD)
+    if (payload_size <= 0 || payload_size > MAX_WIIMOTE_PAYLOAD)
     {
         printf("[ERROR] Download size of %dB is invalid\n", payload_size);
         return -2;
     }
+    file_pos += 16;
 
     Sleep(1); // read file NAME
-    if (read_from_wiimote(remote, buffer, 0x10) == -1)
+    if (read_from_wiimote(remote, read_buf, 0x10) == -1)
     {
         return -1;
     }
-    char *cp = file_name;
-    int i    = 0;
-    while (i < 16 && buffer[i] != -52)
+    int i = 0;
+    while (i < 16 && read_buf[i] != -52)
     {
-        *cp++ = buffer[i++];
+        wpf->file_name[i] = read_buf[i];
+        file_pos[i]       = read_buf[i];
+        i++;
     }
+    wpf->file_name[i] = 0;
+    file_pos += 16;
 
     Sleep(1); // read file EXTENSION
-    if (read_from_wiimote(remote, buffer, 0x20) == -1)
+    if (read_from_wiimote(remote, read_buf, 0x20) == -1)
     {
         return -1;
     }
     i = 0;
-    while (i < 16 && buffer[i] != -52)
+    while (i < 16 && file_pos[i] != -52)
     {
-        if (i == 0)
-        {
-            *cp++ = '.';
-        }
-        *cp++ = buffer[i++];
+        wpf->file_ext[i] = read_buf[i];
+        file_pos[i]      = read_buf[i];
+        i++;
     }
-    *cp = '\0';
+    wpf->file_ext[i] = 0;
+    file_pos += 16;
+
+    sprintf_s(file_name, 39, "%s%s%d.wpf", wpf->file_name, wpf->file_ext, cur_wiimote);
     Sleep(1);
 
     printf("[INFO] File found: %s\n", file_name);
@@ -445,18 +462,26 @@ int download_header(wiimote *remote, char *file_name)
     return 1;
 }
 
-int download_file(wiimote *remote, char *file_buffer, char *file_name, int address)
+/**
+ * @brief download_file
+ *
+ * @param wiimote *remote, char *file_buffer, char *file_name, int address
+ *
+ * Downloads a single file on a given remote
+ */
+int download_file(wiimote *remote, char *file_buffer, char *file_name, int address, WiimotePartialFile *wpf)
 {
     char *file_pos = file_buffer;
 
     // get header data
     if (address < 0x30)
     {
-        switch (download_header(remote, file_name))
+        switch (download_header(remote, file_pos, file_name, wpf))
         {
         case 1:
             address = 0x30; // success! continue
             print_progress(remote, "DATA DOWNLOADED:", (float)payload_received, (float)payload_size);
+            file_pos += 0x30;
             break;
         case -1:
             return 0x00; // timed out
@@ -466,7 +491,7 @@ int download_file(wiimote *remote, char *file_buffer, char *file_name, int addre
     } else
     {
         printf("[INFO] Resuming download. %dB out of %dB\n", payload_received, payload_size);
-        file_pos += address - 0x30;
+        file_pos += address;
     }
 
     // read 16 at a time
@@ -482,17 +507,19 @@ int download_file(wiimote *remote, char *file_buffer, char *file_name, int addre
         Sleep(1);
 
         // update payload and file pos
-        payload_received = payload_received > payload_size ? payload_size : payload_received + 16;
+        payload_received += 16;
         file_pos += 16;
         address += 0x10;
         print_progress(remote, "DATA DOWNLOADED:", (float)payload_received, (float)payload_size);
     }
+    payload_received = payload_size;
+    print_progress(remote, "DATA DOWNLOADED:", (float)payload_received, (float)payload_size);
 
     // save downloaded data
     printf("\n[INFO] Data successfully downloaded. Preparing to write to file\n");
     FILE *fp;
     fopen_s(&fp, file_name, "wb");
-    fwrite(file_buffer, payload_size, sizeof(char), fp);
+    fwrite(file_buffer, payload_size + 0x30, sizeof(char), fp);
     // end download
     printf("[INFO] Data successfully written\n");
     alert_remote(remote);
@@ -505,39 +532,77 @@ void run_selected_process(wiimote **wiimotes, char *file_name, int mode)
 {
     // start of app
     wiiuse_set_leds(wiimotes[0], 0x00);
-    int address = 0x00;                 // where on the remote we are
-    int fails   = 0;                    // how many times a process failed
-    char buffer[MAX_WIIMOTE_PAYLOAD];   // used to hold data received/sent
-    int res;                            // result from an operation
-    FILE *fp;                           // the file we are reading/writing to
+    int address = 0x00;               // where on the remote we are
+    int fails   = 0;                  // how many times a process failed
+    char buffer[MAX_WIIMOTE_PAYLOAD]; // used to hold data received/sent
+    int res;                          // result from an operation
+    FILE *fp;                         // the file we are reading/writing to
+    // this data is used to upload/download data
+    WiimotePartialFile wpf;
+    char name[17];
+    char ext[17];
+    wpf.file_name = name;
+    wpf.file_ext  = ext;
+    char wpf_name[39];
+    wpf.cur_wpf = 1;
 
     if (!mode) // init data
     {
-        fopen_s(&fp, file_name, "rb");
-        printf("[INFO] Preparing to upload file to: %s\n", file_name);
+        // set up metadata
+        create_wpf_files(file_name, &wpf);
+        generate_wpf_file_name(wpf_name, &wpf);
+        fopen_s(&fp, wpf_name, "rb");
+        printf("[INFO] Creating and uploading %s\n", wpf_name);
     } else
     {
         printf("[INFO] Preparing to download a file...\n");
     }
     int restarted_task = 0; // set if we ever fail a task
-    while (any_wiimote_connected(wiimotes, MAX_WIIMOTES) && fails++ < 10)
+    do
     {
         switch (mode)
         {
         case 0:
-            res = write_file(wiimotes[0], buffer, file_name, address, fp, restarted_task);
+            res = write_file(wiimotes[wpf.cur_wpf - 1], buffer, file_name, address, fp, restarted_task);
             break;
         case 1:
-            res = download_file(wiimotes[0], buffer, file_name, address);
+            res = download_file(wiimotes[wpf.cur_wpf - 1], buffer, file_name, address, &wpf);
             break;
         }
 
         // handle resulting output
-        if (res == -2 || res == -1) // if a fatal error, or a success results, exit
+        if (res == -1 && !mode)
+        {
+            // we finished writing wpf file, now we download it!
+            printf("[INFO] Removing %s\n", wpf_name);
+            remove(wpf_name);
+            // move up a wpf
+            wpf.cur_wpf++;
+            if (wpf.cur_wpf > wpf.tot_wpf)
+            {
+                printf("[INFO] All wpf's written. Cleaning up.\n");
+                break;
+            }
+            // open the next wpf
+            generate_wpf_file_name(wpf_name, &wpf);
+            printf("[INFO] Creating and uploading %s\n", wpf_name);
+            fopen_s(&fp, wpf_name, "rb");
+        } else if (res == -1)
+        {
+            // update download stuff
+            wpf.cur_wpf++;
+            if (wpf.cur_wpf > tot_wiimotes)
+            {
+                printf("[INFO] All wpf's written. Cleaning up.\n");
+                break;
+            }
+            continue;
+        } else if (res == -2) // if a fatal error, or a success results, exit
         {
             break;
         } else if (res >= 0)
         {
+            printf("RESTARTING ADDRESS: %x\n", res);
             // this prepares to call the method to restart at a specific point
             address        = res;
             restarted_task = 1;
@@ -546,7 +611,8 @@ void run_selected_process(wiimote **wiimotes, char *file_name, int mode)
             wiimotes = connect_remotes();
             printf("\n");
         }
-    }
+    } while (any_wiimote_connected(wiimotes, MAX_WIIMOTES) && fails++ < 10);
+
     if (fails >= 10)
     {
         printf("[ERROR] Process failed 10 times.\n        In the event that the large number of failures is "
@@ -579,7 +645,7 @@ int main(int argc, char **argv)
         }
     } else if (argc == 1) // download
     {
-        char file[34];
+        char file[39];
         file_name = file;
         mode      = 1;
     } else // help
@@ -601,6 +667,20 @@ int main(int argc, char **argv)
 
     printf("\n================================\n\n");
 
+    wiiuse_set_leds(wiimotes[0], 0x00);
+    wiiuse_set_leds(wiimotes[1], 0x00);
+    // char buffer[16];
+    // if (read_from_wiimote(wiimotes[0], buffer, 0x1430) == -1)
+    // {
+    //     return -1;
+    // }
+    // int i = 0;
+    // while (i < 16 && buffer[i] != -52)
+    // {
+    //     printf("%2x ", buffer[i]);
+    //     i++;
+    // }
+    // return 0;
     run_selected_process(wiimotes, file_name, mode);
 
     // wait for rumble input to end

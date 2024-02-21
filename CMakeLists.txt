@@ -5,8 +5,8 @@
 cmake_minimum_required(VERSION 3.0.0)
 
 # Set package properties
-project(WiiUse
-    VERSION 0.15.5
+project(WiimoteFileManager
+    VERSION 0.2.0
     DESCRIPTION "Feature-complete cross-platform Wii Remote access library")
 
 ###

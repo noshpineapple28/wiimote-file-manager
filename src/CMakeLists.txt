@@ -1,5 +1,9 @@
 include_directories(../lib)
-add_executable(wiimote_file_manager main.c)
+set(SOURCES
+wpf_handler.h
+wpf_handler.c
+main.c)
+add_executable(wiimote_file_manager ${SOURCES})
 target_link_libraries(wiimote_file_manager wiiuse)
 
 if(INSTALL_MANAGER)
