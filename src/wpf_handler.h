@@ -119,4 +119,18 @@ int generate_wpf_file_name(char *buffer, WiimotePartialFile *metadata);
  */
 int create_wpf_files(char *file_name, WiimotePartialFile *metadata);
 
+/**
+ * @brief stitch_together_wpfs
+ *
+ * @param WiimotePartialFile* metadata - the wpf containing info necessary to redownload the image
+ *
+ * @returns 1 on success, 0 on failure
+ *
+ * Using the WPF struct generated from downloaded data, creates a
+ *      file that will have the same name as the OG file
+ * It will read from the .wpf files downloaded, splice them into the
+ *      generated file, and remove the .wpfs
+ */
+int stitch_together_wpfs(WiimotePartialFile *wpf);
+
 #endif

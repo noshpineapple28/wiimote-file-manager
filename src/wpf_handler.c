@@ -234,3 +234,55 @@ int create_wpf_files(char *file_name, WiimotePartialFile *metadata)
     fclose(fp);
     return metadata->tot_wpf;
 }
+
+int stitch_together_wpfs(WiimotePartialFile *wpf)
+{
+    FILE *stitched_file;
+    char stitched_file_name[34];
+    if (wpf->file_ext[0] != 0)
+        sprintf_s(stitched_file_name, 35, "%s.%s", wpf->file_name, wpf->file_ext);
+    else
+        sprintf_s(stitched_file_name, 35, "%s", wpf->file_name);
+    // open our file for writing
+    if (fopen_s(&stitched_file, stitched_file_name, "wb"))
+    {
+        printf("[ERROR] Could not create file %s for stitching.\n", stitched_file_name);
+        return 0;
+    }
+    printf("[INFO] Creating file %s\n", stitched_file_name);
+
+    // begin stitching files
+    wpf->cur_wpf = 1;
+    char wpf_name[39];
+    char write_buffer[MAX_FILE_SIZE];
+    FILE *wpf_file;
+    // run through all .wpf files downloaded and stitch together
+    while (wpf->cur_wpf <= wpf->tot_wpf)
+    {
+        // ensure the file exists, if not, exit app
+        generate_wpf_file_name(wpf_name, wpf);
+        if (fopen_s(&wpf_file, wpf_name, "rb"))
+        {
+            printf("[ERROR] Could not read .wpf file %s. If missing, please redownload. If locked, please "
+                   "close the program currently reading it.\n",
+                   wpf_name);
+            return 0;
+        }
+        printf("[INFO] Stitching file %s\n", wpf_name);
+        // use the returned size, not wpf->cur_wpf_size, this func doesnt set that value
+        int wpf_size = (int)find_size(wpf_name, wpf);
+        // skip the first 0x30 data
+        fread(write_buffer, sizeof(char), 0x30, wpf_file);
+        fread(write_buffer, sizeof(char), wpf_size - 0x30, wpf_file);
+        // write to the buffer
+        fwrite(write_buffer, sizeof(char), wpf_size - 0x30, stitched_file);
+        // close and remove the wpf
+        fclose(wpf_file);
+        remove(wpf_name);
+        wpf->cur_wpf++;
+    }
+    // close and exit
+    fclose(stitched_file);
+
+    return 1;
+}
